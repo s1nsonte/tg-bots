@@ -10,7 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 logging.basicConfig(level=logging.INFO)
 
 # ====================== НАСТРОЙКИ ======================
-TOKEN =    # Твой токен уже вставлен
+TOKEN =    
 
 # ====================== БАЗА ДАННЫХ ======================
 def init_db():
