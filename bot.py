@@ -19,10 +19,18 @@ bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# ====================== ПУТЬ К БАЗЕ ДАННЫХ ДЛЯ RAILWAY ======================
+DATA_DIR = "/data"                    # Volume, который ты прикрепил
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "series_bot.db")
+
+print(f"✅ База данных хранится в Volume: {DB_PATH}")
+
 
 # ====================== БАЗА ДАННЫХ ======================
 def init_db():
-    with sqlite3.connect('series_bot.db') as conn:
+    """Инициализация базы данных"""
+    with sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
         cur.executescript('''
             CREATE TABLE IF NOT EXISTS series (
@@ -50,6 +58,7 @@ def init_db():
                 UNIQUE(series_id, season)
             );
         ''')
+    print("✅ База данных успешно инициализирована")
 
 
 # ====================== СОСТОЯНИЯ ======================
@@ -60,7 +69,7 @@ class BotStates(StatesGroup):
     enter_episodes_count = State()
     input_season_episode = State()
     input_season_finish = State()
-    mark_multiple_season = State()   # если episodes_per_season не задан
+    mark_multiple_season = State()
     mark_multiple_episodes = State()
 
 
@@ -107,7 +116,7 @@ async def cmd_start(message: types.Message):
         "Команды:\n"
         "/add — добавить новый сериал\n"
         "/my  — посмотреть мои сериалы\n"
-        "/cancel — выйти из текущего действия"
+        "/cancel — отменить текущее действие"
     )
 
 
@@ -115,7 +124,7 @@ async def cmd_start(message: types.Message):
 async def cmd_cancel(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Действие отменено.")
-    
+
 
 @dp.message(Command("add"))
 async def cmd_add(message: types.Message, state: FSMContext):
@@ -202,7 +211,6 @@ async def skip_episodes_count(message: types.Message, state: FSMContext):
 
 
 async def show_confirmation(message: types.Message, state: FSMContext):
-    """Показ подтверждения перед сохранением"""
     data = await state.get_data()
     days_map = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     selected = data.get("selected_days", [])
@@ -211,7 +219,6 @@ async def show_confirmation(message: types.Message, state: FSMContext):
     text = f"Название: {data.get('name')}\nДни выхода: {days_str}\n"
     if data.get("episodes_count"):
         text += f"Серий в сезоне: {data['episodes_count']}\n"
-
     text += "\nВсё верно?"
 
     await message.answer(
@@ -225,27 +232,22 @@ async def show_confirmation(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "save_series")
 async def save_series(callback: types.CallbackQuery, state: FSMContext):
-    """Сохранение сериала в базу"""
     data = await state.get_data()
     user_id = callback.from_user.id
     name = data.get('name')
 
     if not name:
-        await callback.answer("Ошибка: название не найдено", show_alert=True)
+        await callback.answer("Ошибка: название сериала не найдено", show_alert=True)
         return
 
     try:
-        with sqlite3.connect('series_bot.db') as conn:
+        with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
             cur.execute(
                 """INSERT INTO series 
                    (user_id, name, poster_file_id, airing_days, episodes_per_season)
                    VALUES (?, ?, ?, ?, ?)""",
-                (user_id,
-                 name,
-                 data.get('poster'),
-                 ','.join(data.get('selected_days', [])),
-                 data.get('episodes_count'))
+                (user_id, name, data.get('poster'), ','.join(data.get('selected_days', [])), data.get('episodes_count'))
             )
             conn.commit()
 
@@ -273,7 +275,7 @@ async def restart_add(callback: types.CallbackQuery, state: FSMContext):
 async def cmd_my(message: types.Message):
     user_id = message.from_user.id
 
-    with sqlite3.connect('series_bot.db') as conn:
+    with sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
         cur.execute(
             """SELECT id, name, poster_file_id, airing_days, completed, episodes_per_season 
@@ -313,14 +315,10 @@ async def cmd_my(message: types.Message):
             await message.answer(caption, parse_mode="HTML", reply_markup=series_keyboard(sid, completed))
 
 
-# ====================== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ======================
-# (watch_, finish_, mark_episodes_, delete_, complete_ и т.д.)
-# Для краткости я оставил только ключевые, но все остальные из предыдущей версии работают.
-
-# ====================== ЗАПУСК БОТА ======================
+# ====================== ЗАПУСК ======================
 async def main():
     init_db()
-    print("🤖 Бот для трекинга сериалов запущен...")
+    print("🤖 Бот для трекинга сериалов успешно запущен...")
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
