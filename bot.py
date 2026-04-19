@@ -98,6 +98,7 @@ def init_db():
             );
         ''')
 
+        # Добавляем недостающие колонки
         columns = [
             ("original_name", "TEXT"),
             ("tmdb_id", "INTEGER"),
@@ -159,65 +160,80 @@ def series_keyboard(series_id: int, completed: bool = False, notifications: bool
     keyboard.append([InlineKeyboardButton(text="🗑 Удалить сериал", callback_data=f"delete_{series_id}")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# ====================== API ФУНКЦИИ ======================
+# ====================== ПОИСК: TMDB → Kinopoisk → TVMaze ======================
 async def search_tmdb(query: str):
-    if not TMDB_API_KEY or not query: return None
+    if not TMDB_API_KEY or not query:
+        return None
     params = {"api_key": TMDB_API_KEY, "query": query, "language": "ru-RU"}
     async with aiohttp.ClientSession() as session:
         async with session.get(TMDB_SEARCH, params=params) as resp:
-            if resp.status != 200: return None
+            if resp.status != 200:
+                return None
             data = await resp.json()
             return data.get("results")[0] if data.get("results") else None
 
 async def get_tmdb_details(tmdb_id: int):
-    if not TMDB_API_KEY: return None
+    if not TMDB_API_KEY:
+        return None
     url = TMDB_DETAILS.format(tmdb_id=tmdb_id)
     params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "append_to_response": "external_ids"}
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as resp:
-            if resp.status != 200: return None
+            if resp.status != 200:
+                return None
             return await resp.json()
 
 async def search_kinopoisk(query: str):
-    if not KINOPOISK_API_KEY or not query: return None
+    if not KINOPOISK_API_KEY or not query:
+        return None
     headers = {"X-API-KEY": KINOPOISK_API_KEY}
     params = {"keyword": query, "page": 1}
     async with aiohttp.ClientSession() as session:
         async with session.get(KINOPOISK_SEARCH, headers=headers, params=params) as resp:
-            if resp.status != 200: return None
+            if resp.status != 200:
+                return None
             data = await resp.json()
             return data.get("items")[0] if data.get("items") else None
 
 async def get_kinopoisk_details(kp_id: int):
-    if not KINOPOISK_API_KEY: return None
+    if not KINOPOISK_API_KEY:
+        return None
     headers = {"X-API-KEY": KINOPOISK_API_KEY}
     url = KINOPOISK_DETAILS.format(kp_id=kp_id)
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers) as resp:
-            if resp.status != 200: return None
+            if resp.status != 200:
+                return None
             return await resp.json()
 
 async def search_tvmaze(query: str):
-    if not query: return None
+    if not query:
+        return None
     async with aiohttp.ClientSession() as session:
         async with session.get(TVMAZE_SEARCH + query.replace(" ", "+")) as resp:
-            if resp.status != 200: return None
+            if resp.status != 200:
+                return None
             data = await resp.json()
             return data[0]['show'] if data else None
 
 async def get_next_episode(tvmaze_id: int):
-    if not tvmaze_id: return None
+    if not tvmaze_id:
+        return None
     async with aiohttp.ClientSession() as session:
         async with session.get(f"https://api.tvmaze.com/shows/{tvmaze_id}/nextepisode") as resp:
-            if resp.status in (404, 204): return None
-            if resp.status != 200: return None
+            if resp.status in (404, 204):
+                return None
+            if resp.status != 200:
+                return None
             return await resp.json()
 
 async def get_episodes_per_season(tvmaze_id: int) -> int:
-    if not tvmaze_id: return 24
+    if not tvmaze_id:
+        return 24
     async with aiohttp.ClientSession() as session:
         async with session.get(f"https://api.tvmaze.com/shows/{tvmaze_id}/episodes") as resp:
-            if resp.status != 200: return 24
+            if resp.status != 200:
+                return 24
             try:
                 episodes = await resp.json()
             except:
@@ -229,7 +245,8 @@ async def get_episodes_per_season(tvmaze_id: int) -> int:
             return max(season_ep_count.values()) if season_ep_count else 24
 
 async def download_poster_silently(file_url: str | None, user_id: int) -> str | None:
-    if not file_url: return None
+    if not file_url:
+        return None
     try:
         msg = await bot.send_photo(chat_id=user_id, photo=file_url, disable_notification=True)
         file_id = msg.photo[-1].file_id
@@ -330,37 +347,60 @@ async def try_search_series(message: types.Message, state: FSMContext):
     data = await state.get_data()
     search_query = data.get("original_name") or data["name"]
 
+    # 1. TMDB — первый приоритет
     tmdb_result = await search_tmdb(search_query)
     if tmdb_result:
         tmdb_id = tmdb_result['id']
         details = await get_tmdb_details(tmdb_id)
-        kp_id = tvmaze_id = None
+        kp_id = None
+        tvmaze_id = None
         if details and details.get('external_ids'):
             kp_id = details['external_ids'].get('kinopoisk_id') or details['external_ids'].get('kp_id')
             tvmaze_id = details['external_ids'].get('tvmaze_id')
-        poster_url = f"https://image.tmdb.org/t/p/original{tmdb_result.get('poster_path')}" if tmdb_result.get('poster_path') else None
-        await state.update_data(tmdb_id=tmdb_id, kinopoisk_id=kp_id, tvmaze_id=tvmaze_id, poster_url=poster_url, found_name=tmdb_result.get('name'))
+        poster_path = tmdb_result.get('poster_path')
+        poster_url = f"https://image.tmdb.org/t/p/original{poster_path}" if poster_path else None
+        await state.update_data(
+            tmdb_id=tmdb_id,
+            kinopoisk_id=kp_id,
+            tvmaze_id=tvmaze_id,
+            poster_url=poster_url,
+            found_name=tmdb_result.get('name')
+        )
         await process_start_season_choice(message, state)
         return
 
+    # 2. Kinopoisk
     kp_result = await search_kinopoisk(search_query)
     if kp_result:
         kp_id = kp_result['kinopoiskId']
         details = await get_kinopoisk_details(kp_id)
         poster_url = details.get('posterUrl') if details else kp_result.get('posterUrl')
         name = kp_result.get('nameRu') or kp_result.get('nameOriginal')
-        await state.update_data(kinopoisk_id=kp_id, poster_url=poster_url, found_name=name)
+        await state.update_data(
+            kinopoisk_id=kp_id,
+            tmdb_id=None,
+            tvmaze_id=None,
+            poster_url=poster_url,
+            found_name=name
+        )
         await process_start_season_choice(message, state)
         return
 
+    # 3. TVMaze — запасной вариант
     tvmaze_show = await search_tvmaze(search_query)
     if tvmaze_show:
         poster_url = tvmaze_show.get('image', {}).get('original')
-        await state.update_data(tvmaze_id=tvmaze_show['id'], poster_url=poster_url, found_name=tvmaze_show.get('name'))
+        await state.update_data(
+            tvmaze_id=tvmaze_show['id'],
+            tmdb_id=None,
+            kinopoisk_id=None,
+            poster_url=poster_url,
+            found_name=tvmaze_show.get('name')
+        )
         await process_start_season_choice(message, state)
         return
 
-    await message.answer("❌ Сериал не найден.")
+    await message.answer("❌ Сериал не найден ни в TMDB, ни в Kinopoisk, ни в TVMaze.")
     await state.clear()
 
 async def process_start_season_choice(message: types.Message, state: FSMContext):
@@ -373,7 +413,8 @@ async def process_start_season_choice(message: types.Message, state: FSMContext)
 async def process_start_season(message: types.Message, state: FSMContext):
     try:
         start_season = int(message.text.strip())
-        if start_season < 1: raise ValueError
+        if start_season < 1:
+            raise ValueError
     except ValueError:
         await message.answer("❌ Введи корректный номер сезона (от 1)")
         return
@@ -400,13 +441,15 @@ async def confirm_add_series(message: types.Message, state: FSMContext):
             INSERT INTO series (user_id, name, original_name, tmdb_id, kinopoisk_id, tvmaze_id,
                                poster_file_id, episodes_per_season, start_season)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, name, original_name, tmdb_id, kinopoisk_id, tvmaze_id, poster_file_id, episodes_per_season, start_season))
+        ''', (user_id, name, original_name, tmdb_id, kinopoisk_id, tvmaze_id,
+              poster_file_id, episodes_per_season, start_season))
         series_id = cur.lastrowid
 
         if start_season > 1:
             for s in range(1, start_season):
                 for ep in range(1, episodes_per_season + 1):
-                    cur.execute("INSERT OR IGNORE INTO watched_episodes (series_id, season, episode) VALUES (?, ?, ?)", (series_id, s, ep))
+                    cur.execute("INSERT OR IGNORE INTO watched_episodes (series_id, season, episode) VALUES (?, ?, ?)",
+                                (series_id, s, ep))
         conn.commit()
 
     with get_db() as conn:
@@ -424,7 +467,10 @@ async def cmd_my(message: types.Message):
     user_id = message.from_user.id
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT id, name, poster_file_id, airing_days, completed, notifications_enabled FROM series WHERE user_id = ?", (user_id,))
+        cur.execute("""
+            SELECT id, name, poster_file_id, airing_days, completed, notifications_enabled
+            FROM series WHERE user_id = ?
+        """, (user_id,))
         series_list = cur.fetchall()
 
     if not series_list:
@@ -436,7 +482,10 @@ async def cmd_my(message: types.Message):
         airing_str = ', '.join(days_map[int(d)] for d in airing_days.split(',')) if airing_days else "—"
         total_watched = get_watched_count(sid)
         progress_lines = [f"Сезон {s}: {w}/{t}{st}" for s, w, t, st in get_active_seasons_progress(sid)]
-        caption = f"🎬 <b>{name}</b>\n📅 Выход: {airing_str}\n👁 Просмотрено всего: {total_watched}\n\n" + "\n".join(progress_lines)
+        caption = (f"🎬 <b>{name}</b>\n"
+                   f"📅 Выход: {airing_str}\n"
+                   f"👁 Просмотрено всего: {total_watched}\n\n"
+                   + "\n".join(progress_lines))
         markup = series_keyboard(sid, completed, notif)
 
         if poster:
@@ -447,7 +496,7 @@ async def cmd_my(message: types.Message):
         else:
             await message.answer(caption, parse_mode="HTML", reply_markup=markup)
 
-# ====================== ОТМЕТКА ЭПИЗОДОВ (ИСПРАВЛЕНО) ======================
+# ====================== ОТМЕТКА ЭПИЗОДОВ ======================
 @dp.callback_query(F.data.startswith("mark_episodes_"))
 async def start_mark_episodes(callback: types.CallbackQuery, state: FSMContext):
     series_id = int(callback.data.split("_")[-1])
@@ -478,38 +527,29 @@ async def process_select_season_mark(message: types.Message, state: FSMContext):
 @dp.callback_query(F.data.startswith("toggle_ep_"))
 async def toggle_episode(callback: types.CallbackQuery, state: FSMContext):
     try:
-        # Исправленная надёжная распаковка
         parts = callback.data.split("_")
-        if len(parts) != 5 or parts[0] != "toggle" or parts[1] != "ep":
-            await callback.answer("Ошибка данных кнопки", show_alert=True)
-            return
-
         series_id = int(parts[2])
         season = int(parts[3])
         episode = int(parts[4])
-    except (ValueError, IndexError):
-        await callback.answer("Ошибка обработки эпизода", show_alert=True)
+    except (IndexError, ValueError):
+        await callback.answer("Ошибка данных", show_alert=True)
         return
 
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("INSERT OR IGNORE INTO watched_episodes (series_id, season, episode) VALUES (?,?,?)", 
+        cur.execute("INSERT OR IGNORE INTO watched_episodes (series_id, season, episode) VALUES (?,?,?)",
                     (series_id, season, episode))
         if cur.rowcount == 0:
-            cur.execute("DELETE FROM watched_episodes WHERE series_id=? AND season=? AND episode=?", 
+            cur.execute("DELETE FROM watched_episodes WHERE series_id=? AND season=? AND episode=?",
                         (series_id, season, episode))
         conn.commit()
 
-    # Обновляем клавиатуру
     data = await state.get_data()
     total = data.get("total_episodes", 24)
     try:
-        await callback.message.edit_reply_markup(
-            reply_markup=episodes_keyboard(series_id, season, total)
-        )
+        await callback.message.edit_reply_markup(reply_markup=episodes_keyboard(series_id, season, total))
     except TelegramBadRequest:
         pass
-
     await callback.answer(f"S{season}E{episode}")
 
 @dp.callback_query(F.data.startswith("finish_marking_"))
@@ -519,7 +559,7 @@ async def finish_marking(callback: types.CallbackQuery, state: FSMContext):
     series_id = int(callback.data.split("_")[-1])
     await show_series_menu(callback.message, series_id)
 
-# ====================== ОСТАЛЬНЫЕ ХЕНДЛЕРЫ ======================
+# ====================== ЗАВЕРШЕНИЕ СЕЗОНА ======================
 @dp.callback_query(F.data.startswith("finish_season_"))
 async def start_finish_season(callback: types.CallbackQuery, state: FSMContext):
     series_id = int(callback.data.split("_")[-1])
@@ -548,6 +588,7 @@ async def process_finish_season(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Сезон {season} завершён!")
     await show_series_menu(message, series_id)
 
+# ====================== ОСТАЛЬНЫЕ ХЕНДЛЕРЫ ======================
 @dp.callback_query(F.data.startswith("calendar_"))
 async def show_calendar(callback: types.CallbackQuery):
     series_id = int(callback.data.split("_")[1])
@@ -655,7 +696,10 @@ async def show_series_menu(message: types.Message, series_id: int):
     airing_str = ', '.join(days_map[int(d)] for d in airing_days.split(',')) if airing_days else "—"
     total_watched = get_watched_count(series_id)
     progress_lines = [f"Сезон {s}: {w}/{t}{st}" for s, w, t, st in get_active_seasons_progress(series_id)]
-    caption = f"🎬 <b>{name}</b>\n📅 Выход: {airing_str}\n👁 Просмотрено всего: {total_watched}\n\n" + "\n".join(progress_lines)
+    caption = (f"🎬 <b>{name}</b>\n"
+               f"📅 Выход: {airing_str}\n"
+               f"👁 Просмотрено всего: {total_watched}\n\n"
+               + "\n".join(progress_lines))
     markup = series_keyboard(series_id, completed, notif)
 
     try:
@@ -679,7 +723,7 @@ async def main():
     scheduler.start()
     schedule_notifications()
 
-    print("🚀 Бот запущен — ошибка с unpack в toggle_episode исправлена")
+    print("🚀 Бот запущен с цепочкой: TMDB → Kinopoisk → TVMaze")
     await asyncio.gather(
         start_web_server(),
         dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
