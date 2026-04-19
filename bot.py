@@ -2,7 +2,6 @@ import asyncio
 import logging
 import sqlite3
 import os
-
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -23,9 +22,7 @@ dp = Dispatcher(storage=storage)
 DATA_DIR = "/data"
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH = os.path.join(DATA_DIR, "series_bot.db")
-
 print(f"✅ База данных: {DB_PATH}")
-
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -56,7 +53,6 @@ def init_db():
         ''')
     print("✅ База данных инициализирована")
 
-
 class BotStates(StatesGroup):
     add_name = State()
     add_poster = State()
@@ -64,13 +60,13 @@ class BotStates(StatesGroup):
     enter_episodes_count = State()
     input_season_episode = State()
     input_season_finish = State()
-    mark_multiple_season = State()      # ввод сезона
-    mark_multiple_episodes = State()    # выбор серий
-
+    mark_multiple_season = State()
+    mark_multiple_episodes = State()
 
 # ====================== КЛАВИАТУРЫ ======================
 def day_keyboard(selected_days=None):
-    if selected_days is None: selected_days = []
+    if selected_days is None:
+        selected_days = []
     days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     buttons = [[types.InlineKeyboardButton(
         text=f"{'🟢' if str(i) in selected_days else '🔳'} {day}",
@@ -79,47 +75,71 @@ def day_keyboard(selected_days=None):
     buttons.append([types.InlineKeyboardButton(text="Готово ✅", callback_data="done_days")])
     return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def episodes_keyboard(series_id: int, season: int, total: int):
+    """Клавиатура с галочками для отметки просмотренных эпизодов"""
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT episode FROM watched_episodes WHERE series_id = ? AND season = ?", 
+                    (series_id, season))
+        watched = {row[0] for row in cur.fetchall()}
 
-def episodes_keyboard(season: int, total: int):
-    rows = [[types.InlineKeyboardButton(text=str(ep), callback_data=f"ep_{season}_{ep}")] 
-            for ep in range(1, total + 1)]
-    rows.append([types.InlineKeyboardButton(text="Назад ↩️", callback_data="back_to_menu")])
-    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+    buttons = []
+    row = []
+    for ep in range(1, total + 1):
+        status = "✅" if ep in watched else "⬜"
+        row.append(types.InlineKeyboardButton(
+            text=f"{status} {ep}",
+            callback_data=f"toggle_ep_{series_id}_{season}_{ep}"
+        ))
+        if len(row) == 5:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
 
+    buttons.append([types.InlineKeyboardButton(text="✅ Готово", callback_data=f"finish_marking_{series_id}")])
+    buttons.append([types.InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_marking")])
+
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def series_keyboard(series_id: int, completed: bool = False):
     keyboard = [
-        [types.InlineKeyboardButton(text="✅ Отметить эпизод", callback_data=f"watch_{series_id}")],
+        [types.InlineKeyboardButton(text="📺 Отметить просмотренные эпизоды", 
+                                   callback_data=f"mark_episodes_{series_id}")],
         [types.InlineKeyboardButton(text="🏁 Завершить сезон", callback_data=f"finish_{series_id}")],
-        [types.InlineKeyboardButton(text="Отметить несколько серий", callback_data=f"mark_episodes_{series_id}")],
     ]
     if not completed:
-        keyboard.append([types.InlineKeyboardButton(text="Завершить сериал 🆕", callback_data=f"complete_{series_id}")])
-    keyboard.append([types.InlineKeyboardButton(text="Удалить сериал 🗑", callback_data=f"delete_{series_id}")])
+        keyboard.append([types.InlineKeyboardButton(text="Завершить сериал 🆕", 
+                                                   callback_data=f"complete_{series_id}")])
+    keyboard.append([types.InlineKeyboardButton(text="🗑 Удалить сериал", callback_data=f"delete_{series_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+# ====================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ======================
+def get_watched_count(series_id: int) -> int:
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM watched_episodes WHERE series_id = ?", (series_id,))
+        return cur.fetchone()[0]
 
 # ====================== ОСНОВНЫЕ КОМАНДЫ ======================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("👋 Бот трекинга сериалов\n\n/add — добавить\n/my — мои сериалы")
-
+    await message.answer("👋 Бот трекинга сериалов\n\n/add — добавить сериал\n/my — мои сериалы")
 
 @dp.message(Command("add"))
 async def cmd_add(message: types.Message, state: FSMContext):
     await state.set_state(BotStates.add_name)
     await message.answer("📝 Название сериала:")
 
-
-# ... (добавление сериала остаётся прежним, для краткости опущено ниже)
-
-
 @dp.message(Command("my"))
 async def cmd_my(message: types.Message):
     user_id = message.from_user.id
     with sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT id, name, poster_file_id, airing_days, completed, episodes_per_season FROM series WHERE user_id = ?", (user_id,))
+        cur.execute("""
+            SELECT id, name, poster_file_id, airing_days, completed, episodes_per_season 
+            FROM series WHERE user_id = ?
+        """, (user_id,))
         series_list = cur.fetchall()
 
     if not series_list:
@@ -127,30 +147,27 @@ async def cmd_my(message: types.Message):
         return
 
     days_map = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-    for sid, name, poster, airing_days, completed, eps in series_list:
+    for sid, name, poster, airing_days, completed, eps_per_season in series_list:
         airing_str = ', '.join(days_map[int(d)] for d in airing_days.split(',')) if airing_days else "—"
-        cur.execute("SELECT COUNT(*) FROM watched_episodes WHERE series_id = ?", (sid,))
-        watched = cur.fetchone()[0]
+        watched = get_watched_count(sid)
+
         cur.execute("SELECT season FROM finished_seasons WHERE series_id = ?", (sid,))
-        finished_str = ", ".join(str(row[0]) for row in cur.fetchall()) or "нет"
+        finished_seasons = [str(row[0]) for row in cur.fetchall()]
+        finished_str = ", ".join(finished_seasons) or "нет"
 
         caption = f"🎬 <b>{name}</b>\n📅 Выход: {airing_str}\n👁 Просмотрено: {watched}\n🏁 Сезоны: {finished_str}"
 
+        markup = series_keyboard(sid, completed)
+
         if poster:
-            await message.answer_photo(photo=poster, caption=caption, parse_mode="HTML", reply_markup=series_keyboard(sid, completed))
+            await message.answer_photo(photo=poster, caption=caption, parse_mode="HTML", reply_markup=markup)
         else:
-            await message.answer(caption, parse_mode="HTML", reply_markup=series_keyboard(sid, completed))
+            await message.answer(caption, parse_mode="HTML", reply_markup=markup)
 
-
-# ====================== МАССОВАЯ ОТМЕТКА СЕРИЙ (ИСПРАВЛЕНО) ======================
+# ====================== ОТМЕТКА ПРОСМОТРЕННЫХ ЭПИЗОДОВ ======================
 @dp.callback_query(F.data.startswith("mark_episodes_"))
 async def start_mark_episodes(callback: types.CallbackQuery, state: FSMContext):
-    # Правильно извлекаем series_id
-    try:
-        series_id = int(callback.data.split("_")[-1])   # берём последний элемент
-    except ValueError:
-        await callback.answer("Ошибка: неверный ID сериала", show_alert=True)
-        return
+    series_id = int(callback.data.split("_")[-1])
 
     await state.update_data(series_id=series_id)
 
@@ -158,75 +175,91 @@ async def start_mark_episodes(callback: types.CallbackQuery, state: FSMContext):
         cur = conn.cursor()
         cur.execute("SELECT episodes_per_season FROM series WHERE id = ?", (series_id,))
         result = cur.fetchone()
-        episodes_count = result[0] if result else None
 
-    if episodes_count and episodes_count > 0:
-        await state.update_data(total_episodes=episodes_count)
-        await state.set_state(BotStates.mark_multiple_episodes)
-        await callback.message.answer(
-            f"Выбери серии сезона 1:", 
-            reply_markup=episodes_keyboard(1, episodes_count)
-        )
-    else:
-        await state.set_state(BotStates.mark_multiple_season)
-        await callback.message.answer("Напиши номер сезона для отметки серий:")
+    episodes_count = result[0] if result and result[0] else 30
 
+    await state.update_data(total_episodes=episodes_count, current_season=1)
+    await state.set_state(BotStates.mark_multiple_episodes)
+
+    await callback.message.edit_text(
+        f"Выберите просмотренные эпизоды сезона 1:",
+        reply_markup=episodes_keyboard(series_id, 1, episodes_count)
+    )
     await callback.answer()
 
-
-@dp.message(BotStates.mark_multiple_season)
-async def process_mark_season(message: types.Message, state: FSMContext):
-    try:
-        season = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введи только число!")
-        return
-
-    await state.update_data(current_season=season)
-    await state.set_state(BotStates.mark_multiple_episodes)
-    await message.answer(f"Выбери серии сезона {season}:", 
-                         reply_markup=episodes_keyboard(season, 30))  # можно увеличить лимит
-    await message.delete()
-
-
-@dp.callback_query(F.data.startswith("ep_"))
-async def mark_episode(callback: types.CallbackQuery, state: FSMContext):
-    _, season_str, ep_str = callback.data.split("_")
+@dp.callback_query(F.data.startswith("toggle_ep_"))
+async def toggle_episode(callback: types.CallbackQuery, state: FSMContext):
+    _, series_id_str, season_str, ep_str = callback.data.split("_")
+    series_id = int(series_id_str)
     season = int(season_str)
     episode = int(ep_str)
 
-    data = await state.get_data()
-    series_id = data["series_id"]
-
     with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT OR IGNORE INTO watched_episodes (series_id, season, episode) VALUES (?, ?, ?)",
             (series_id, season, episode)
         )
+        if cur.rowcount == 0:  # уже был — удаляем
+            cur.execute(
+                "DELETE FROM watched_episodes WHERE series_id = ? AND season = ? AND episode = ?",
+                (series_id, season, episode)
+            )
+        conn.commit()
 
     # Обновляем клавиатуру
-    try:
-        total = data.get("total_episodes", 30)
-        await callback.message.edit_reply_markup(reply_markup=episodes_keyboard(season, total))
-    except:
-        pass
+    data = await state.get_data()
+    total = data.get("total_episodes", 30)
+    await callback.message.edit_reply_markup(
+        reply_markup=episodes_keyboard(series_id, season, total)
+    )
+    await callback.answer()
 
-    await callback.answer(f"✅ S{season}E{episode} отмечено")
+@dp.callback_query(F.data.startswith("finish_marking_"))
+async def finish_marking(callback: types.CallbackQuery, state: FSMContext):
+    series_id = int(callback.data.split("_")[-1])
+    watched_count = get_watched_count(series_id)
 
+    await callback.answer(f"✅ Отмечено {watched_count} эпизодов", show_alert=True)
 
-@dp.callback_query(F.data == "back_to_menu")
-async def back_to_menu(callback: types.CallbackQuery, state: FSMContext):
+    # Возвращаемся в меню сериала
+    await state.clear()
+    await show_series_menu(callback.message, series_id)
+
+@dp.callback_query(F.data == "cancel_marking")
+async def cancel_marking(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.delete()
-    await callback.answer("Вернулись в меню")
+    await callback.answer("Отменено")
 
+async def show_series_menu(message: types.Message, series_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT name, poster_file_id, airing_days, completed, episodes_per_season FROM series WHERE id = ?", (series_id,))
+        row = cur.fetchone()
+        if not row:
+            return
+
+        name, poster, airing_days, completed, eps = row
+        days_map = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        airing_str = ', '.join(days_map[int(d)] for d in airing_days.split(',')) if airing_days else "—"
+        watched = get_watched_count(series_id)
+
+        cur.execute("SELECT season FROM finished_seasons WHERE series_id = ?", (series_id,))
+        finished_str = ", ".join(str(r[0]) for r in cur.fetchall()) or "нет"
+
+        caption = f"🎬 <b>{name}</b>\n📅 Выход: {airing_str}\n👁 Просмотрено: {watched}\n🏁 Сезоны: {finished_str}"
+
+        if poster:
+            await message.edit_text(caption, parse_mode="HTML", reply_markup=series_keyboard(series_id, completed))  # если нет фото
+        else:
+            await message.edit_text(caption, parse_mode="HTML", reply_markup=series_keyboard(series_id, completed))
 
 # ====================== ЗАПУСК ======================
 async def main():
     init_db()
     print("🤖 Бот запущен!")
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-
 
 if __name__ == "__main__":
     asyncio.run(main())
