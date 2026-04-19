@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("BOT_TOKEN")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
-KINOPOISK_API_KEY = os.getenv("KINOPOISK_API_KEY")  # Добавь этот ключ на Railway
+KINOPOISK_API_KEY = os.getenv("KINOPOISK_API_KEY")
 
 if not TOKEN:
     raise ValueError("BOT_TOKEN is missing or empty!")
@@ -55,7 +55,7 @@ async def start_web_server():
     await site.start()
     print("🌐 Веб-сервер запущен на порту 8080")
 
-# ====================== БАЗА ДАННЫХ ======================
+# ====================== БАЗА ДАННЫХ (ИСПРАВЛЕНО) ======================
 def get_db():
     return sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15)
 
@@ -98,8 +98,9 @@ def init_db():
             );
         ''')
 
-        # Добавляем недостающие колонки
+        # Добавляем все недостающие колонки (исправлено)
         columns = [
+            ("original_name", "TEXT"),
             ("tmdb_id", "INTEGER"),
             ("kinopoisk_id", "INTEGER"),
             ("tvmaze_id", "INTEGER"),
@@ -113,7 +114,7 @@ def init_db():
                 cur.execute(f"ALTER TABLE series ADD COLUMN {col} {col_type}")
                 print(f"✅ Добавлена колонка {col}")
             except sqlite3.OperationalError:
-                pass
+                pass  # колонка уже существует
         conn.commit()
     print("✅ База данных инициализирована и обновлена")
 
@@ -346,7 +347,7 @@ async def try_search_series(message: types.Message, state: FSMContext):
     data = await state.get_data()
     search_query = data.get("original_name") or data["name"]
 
-    # 1. TMDB (приоритет)
+    # 1. TMDB
     tmdb_result = await search_tmdb(search_query)
     if tmdb_result:
         tmdb_id = tmdb_result['id']
@@ -388,7 +389,7 @@ async def try_search_series(message: types.Message, state: FSMContext):
         await process_start_season_choice(message, state)
         return
 
-    # 3. TVMaze (fallback)
+    # 3. TVMaze
     tvmaze_show = await search_tvmaze(search_query)
     if tvmaze_show:
         await state.update_data(
@@ -434,6 +435,7 @@ async def confirm_add_series(message: types.Message, state: FSMContext):
     tvmaze_id = data.get("tvmaze_id")
     start_season = data.get("start_season", 1)
     poster_url = data.get("poster_url")
+    original_name = data.get("original_name")
 
     episodes_per_season = await get_episodes_per_season(tvmaze_id) if tvmaze_id else 24
     poster_file_id = await download_poster_silently(poster_url, user_id)
@@ -444,7 +446,7 @@ async def confirm_add_series(message: types.Message, state: FSMContext):
             INSERT INTO series (user_id, name, original_name, tmdb_id, kinopoisk_id, tvmaze_id,
                                poster_file_id, episodes_per_season, start_season)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, name, data.get("original_name"), tmdb_id, kinopoisk_id, tvmaze_id,
+        ''', (user_id, name, original_name, tmdb_id, kinopoisk_id, tvmaze_id,
               poster_file_id, episodes_per_season, start_season))
         series_id = cur.lastrowid
         conn.commit()
@@ -507,32 +509,11 @@ async def cmd_my(message: types.Message):
 async def start_mark_episodes(callback: types.CallbackQuery, state: FSMContext):
     series_id = int(callback.data.split("_")[-1])
     await state.update_data(series_id=series_id)
-    await state.set_state(BotStates.add_start_season)  # переиспользуем состояние для ввода сезона
     try:
         await callback.message.edit_text("Введите номер сезона для отметки эпизодов:")
     except TelegramBadRequest:
         await callback.message.answer("Введите номер сезона для отметки эпизодов:")
     await callback.answer()
-
-@dp.message(BotStates.add_start_season)  # временно используем это состояние для mark
-async def process_select_season_mark(message: types.Message, state: FSMContext):
-    try:
-        season = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введи число!")
-        return
-    data = await state.get_data()
-    series_id = data.get("series_id")
-    if not series_id:
-        await message.answer("Ошибка: сериал не выбран.")
-        await state.clear()
-        return
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT episodes_per_season FROM series WHERE id = ?", (series_id,))
-        eps = cur.fetchone()[0] or 24
-    await state.update_data(current_season=season, total_episodes=eps)
-    await message.answer(f"🎬 Отмечай эпизоды сезона {season}:", reply_markup=episodes_keyboard(series_id, season, eps))
 
 @dp.callback_query(F.data.startswith("toggle_ep_"))
 async def toggle_episode(callback: types.CallbackQuery, state: FSMContext):
@@ -601,27 +582,6 @@ async def start_finish_season(callback: types.CallbackQuery, state: FSMContext):
     except TelegramBadRequest:
         await callback.message.answer("Введите номер сезона для завершения:")
     await callback.answer()
-
-@dp.message(BotStates.add_start_season)  # переиспользуем для finish_season
-async def process_finish_season(message: types.Message, state: FSMContext):
-    try:
-        season = int(message.text.strip())
-    except ValueError:
-        await message.answer("❌ Введи число!")
-        return
-    data = await state.get_data()
-    series_id = data.get("series_id")
-    if not series_id:
-        await message.answer("Ошибка.")
-        await state.clear()
-        return
-    with get_db() as conn:
-        cur = conn.cursor()
-        cur.execute("INSERT OR IGNORE INTO finished_seasons (series_id, season) VALUES (?, ?)", (series_id, season))
-        conn.commit()
-    await state.clear()
-    await message.answer(f"✅ Сезон {season} завершён!")
-    await show_series_menu(message, series_id)
 
 @dp.callback_query(F.data.startswith("toggle_notif_"))
 async def toggle_notifications(callback: types.CallbackQuery):
@@ -728,7 +688,7 @@ async def main():
     scheduler.start()
     schedule_notifications()
 
-    print("🚀 Бот запущен с поддержкой TMDB → Kinopoisk → TVMaze")
+    print("🚀 Бот запущен с поддержкой TMDB → Kinopoisk → TVMaze (ошибка с original_name исправлена)")
     await asyncio.gather(
         start_web_server(),
         dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
