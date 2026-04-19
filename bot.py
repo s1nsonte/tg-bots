@@ -9,6 +9,10 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 logging.basicConfig(level=logging.INFO)  
 
+import os
+
+TOKEN = os.getenv("BOT_TOKEN")
+
 # ====================== БАЗА ДАННЫХ ======================
 def init_db():
     conn = sqlite3.connect('series_bot.db')
