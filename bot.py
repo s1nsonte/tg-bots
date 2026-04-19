@@ -230,7 +230,7 @@ async def main():
     # Увеличенные таймауты специально для Windows
     await dp.start_polling(
         bot,
-        timeout=180,                    # основной таймаут
+        timeout=30,                    # основной таймаут
         relax=1.0,
         allowed_updates=dp.resolve_used_update_types()
     )
