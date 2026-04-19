@@ -145,23 +145,32 @@ async def cmd_my(message: types.Message):
 # ====================== МАССОВАЯ ОТМЕТКА СЕРИЙ (ИСПРАВЛЕНО) ======================
 @dp.callback_query(F.data.startswith("mark_episodes_"))
 async def start_mark_episodes(callback: types.CallbackQuery, state: FSMContext):
-    series_id = int(callback.data.split("_")[1])
+    # Правильно извлекаем series_id
+    try:
+        series_id = int(callback.data.split("_")[-1])   # берём последний элемент
+    except ValueError:
+        await callback.answer("Ошибка: неверный ID сериала", show_alert=True)
+        return
+
     await state.update_data(series_id=series_id)
 
     with sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
         cur.execute("SELECT episodes_per_season FROM series WHERE id = ?", (series_id,))
-        episodes_count = cur.fetchone()[0]
+        result = cur.fetchone()
+        episodes_count = result[0] if result else None
 
     if episodes_count and episodes_count > 0:
         await state.update_data(total_episodes=episodes_count)
         await state.set_state(BotStates.mark_multiple_episodes)
-        await callback.message.answer(f"Выбери серии сезона 1:", 
-                                      reply_markup=episodes_keyboard(1, episodes_count))
+        await callback.message.answer(
+            f"Выбери серии сезона 1:", 
+            reply_markup=episodes_keyboard(1, episodes_count)
+        )
     else:
         await state.set_state(BotStates.mark_multiple_season)
         await callback.message.answer("Напиши номер сезона для отметки серий:")
-    
+
     await callback.answer()
 
 
