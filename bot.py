@@ -7,10 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-logging.basicConfig(level=logging.INFO)
-
-# ====================== НАСТРОЙКИ ======================
-TOKEN =    
+logging.basicConfig(level=logging.INFO)  
 
 # ====================== БАЗА ДАННЫХ ======================
 def init_db():
