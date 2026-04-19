@@ -110,7 +110,7 @@ def series_keyboard(series_id: int, completed: bool = False):
         [types.InlineKeyboardButton(text="🏁 Завершить сезон", callback_data=f"finish_{series_id}")],
     ]
     if not completed:
-        keyboard.append([types.InlineKeyboardButton(text="Завершить сериал 🆕", 
+        keyboard.append([types.InlineKeyboardButton(text="🛑 Завершить сериал", 
                                                    callback_data=f"complete_{series_id}")])
     keyboard.append([types.InlineKeyboardButton(text="🗑 Удалить сериал", callback_data=f"delete_{series_id}")])
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -194,14 +194,13 @@ async def start_mark_episodes(callback: types.CallbackQuery, state: FSMContext):
             parse_mode="HTML"
         )
     except Exception:
-        # Если edit_text не сработал (например, было фото)
         await callback.message.answer(
             text=text,
             reply_markup=episodes_keyboard(series_id, 1, episodes_count),
             parse_mode="HTML"
         )
         try:
-            await callback.message.delete()  # удаляем старое сообщение
+            await callback.message.delete()
         except:
             pass
 
@@ -225,7 +224,7 @@ async def toggle_episode(callback: types.CallbackQuery, state: FSMContext):
             "INSERT OR IGNORE INTO watched_episodes (series_id, season, episode) VALUES (?, ?, ?)",
             (series_id, season, episode)
         )
-        if cur.rowcount == 0:  # уже было — удаляем
+        if cur.rowcount == 0:
             cur.execute(
                 "DELETE FROM watched_episodes WHERE series_id = ? AND season = ? AND episode = ?",
                 (series_id, season, episode)
@@ -241,7 +240,7 @@ async def toggle_episode(callback: types.CallbackQuery, state: FSMContext):
             reply_markup=episodes_keyboard(series_id, current_season, total)
         )
     except:
-        pass  # если не удалось обновить — просто продолжаем
+        pass
 
     await callback.answer(f"✅ S{season}E{episode}")
 
@@ -254,8 +253,6 @@ async def finish_marking(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer(f"✅ Готово! Просмотрено: {watched_count} эпизодов", show_alert=True)
 
     await state.clear()
-
-    # Возвращаем обновлённое меню сериала
     await show_series_menu(callback.message, series_id)
 
 
@@ -297,7 +294,6 @@ async def show_series_menu(message: types.Message, series_id: int):
     try:
         await message.edit_text(caption, parse_mode="HTML", reply_markup=markup)
     except Exception:
-        # Если не получилось отредактировать — отправляем заново
         if poster:
             await message.answer_photo(photo=poster, caption=caption, parse_mode="HTML", reply_markup=markup)
         else:
