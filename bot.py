@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 import aiohttp
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
@@ -34,6 +35,21 @@ TVMAZE_SEARCH = "https://api.tvmaze.com/search/shows?q="
 scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
 
+# ====================== ВЕБ-СЕРВЕР ДЛЯ RAILWAY ======================
+async def health_handler(request):
+    return web.Response(text="Bot is running", status=200)
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    print("🌐 Веб-сервер запущен на порту 8080")
+
+
+# ====================== БАЗА ДАННЫХ ======================
 def get_db():
     return sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15)
 
@@ -76,10 +92,11 @@ def init_db():
         # Добавляем колонку, если её нет
         try:
             cur.execute("ALTER TABLE series ADD COLUMN notifications_enabled BOOLEAN DEFAULT TRUE")
+            print("✅ Добавлена колонка notifications_enabled")
         except sqlite3.OperationalError:
             pass
         conn.commit()
-    print("✅ База данных инициализирована")
+    print("✅ База данных инициализирована и обновлена")
 
 
 # ====================== КЛАВИАТУРЫ ======================
@@ -94,7 +111,7 @@ def confirm_keyboard():
 
 def notification_time_keyboard():
     hours = [InlineKeyboardButton(text=f"{h:02d}:00", callback_data=f"set_time_{h}_0") for h in range(24)]
-    keyboard = [hours[i:i+4] for i in range(0, len(hours), 4)]
+    keyboard = [hours[i:i + 4] for i in range(0, len(hours), 4)]
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def episodes_keyboard(series_id: int, season: int, total: int):
@@ -159,8 +176,9 @@ async def get_episodes_per_season(tvmaze_id: int) -> int:
             if resp.status != 200: return 24
             try:
                 episodes = await resp.json()
-            except:
+            except Exception:
                 return 24
+            if not episodes: return 24
             season_ep_count = defaultdict(int)
             for ep in episodes:
                 if ep.get('season') is not None:
@@ -208,8 +226,12 @@ async def send_user_notifications(user_id: int):
     tomorrow = (datetime.now().date() + timedelta(days=1)).strftime("%Y-%m-%d")
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT id, name, tvmaze_id FROM series WHERE user_id = ? AND notifications_enabled = 1 AND completed = 0", (user_id,))
+        cur.execute("""
+            SELECT id, name, tvmaze_id FROM series 
+            WHERE user_id = ? AND notifications_enabled = 1 AND completed = 0
+        """, (user_id,))
         series_list = cur.fetchall()
+
     for series_id, name, tvmaze_id in series_list:
         if not tvmaze_id: continue
         next_ep = await get_next_episode(tvmaze_id)
@@ -223,7 +245,7 @@ async def send_user_notifications(user_id: int):
         try:
             await bot.send_message(user_id, text, parse_mode="Markdown")
         except Exception as e:
-            logging.error(f"Уведомление не отправлено: {e}")
+            logging.error(f"Уведомление не отправлено {user_id}: {e}")
 
 
 def schedule_notifications():
@@ -232,7 +254,14 @@ def schedule_notifications():
         cur = conn.cursor()
         cur.execute("SELECT user_id, notification_hour, notification_minute FROM users")
         for user_id, hour, minute in cur.fetchall():
-            scheduler.add_job(send_user_notifications, CronTrigger(hour=hour, minute=minute), args=(user_id,), id=f"notif_{user_id}", replace_existing=True)
+            scheduler.add_job(
+                send_user_notifications,
+                CronTrigger(hour=hour, minute=minute),
+                args=(user_id,),
+                id=f"notif_{user_id}",
+                replace_existing=True
+            )
+    print("✅ Планировщик уведомлений обновлён")
 
 
 # ====================== FSM ======================
@@ -245,22 +274,25 @@ class BotStates(StatesGroup):
     mark_multiple_episodes = State()
 
 
-# ====================== ОСНОВНЫЕ ХЕНДЛЕРЫ ======================
+# ====================== ХЕНДЛЕРЫ ======================
 @dp.message(Command("add"))
 async def cmd_add(message: types.Message, state: FSMContext):
     await state.set_state(BotStates.add_name)
-    await message.answer("📝 Введи название сериала:")
+    await message.answer("📝 Введи название сериала (как ты его знаешь):")
+
 
 @dp.message(BotStates.add_name)
 async def process_add_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
     await state.set_state(BotStates.add_original_name)
-    await message.answer("Оригинальное название (если знаешь):", reply_markup=skip_keyboard())
+    await message.answer("Если знаешь оригинальное название — введи его.\nИначе нажми кнопку ниже:", reply_markup=skip_keyboard())
+
 
 @dp.message(BotStates.add_original_name)
 async def process_original_name(message: types.Message, state: FSMContext):
     await state.update_data(original_name=message.text.strip())
     await try_search_tvmaze(message, state)
+
 
 @dp.callback_query(F.data == "skip_original", BotStates.add_original_name)
 async def skip_original(callback: types.CallbackQuery, state: FSMContext):
@@ -268,25 +300,30 @@ async def skip_original(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer("Пропущено")
     await try_search_tvmaze(callback.message, state)
 
+
 async def try_search_tvmaze(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    show = await search_tvmaze(data.get("original_name") or data["name"])
+    query = data.get("original_name") or data["name"]
+    show = await search_tvmaze(query)
     if not show:
-        await message.answer("❌ Сериал не найден.")
+        await message.answer("❌ Не удалось найти сериал. Попробуй другое название.")
         await state.clear()
         return
 
     await state.update_data(tvmaze_id=show['id'], tvmaze_show=show)
-    text = f"✅ Найден: <b>{show['name']}</b>\nДобавить?"
+    text = f"✅ Найден сериал:\n<b>{show['name']}</b>\nДобавить?"
     await state.set_state(BotStates.add_confirm_tvmaze)
     await message.answer(text, parse_mode="HTML", reply_markup=confirm_keyboard())
+
 
 @dp.callback_query(F.data == "confirm_add", BotStates.add_confirm_tvmaze)
 async def confirm_add(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     user_id = callback.from_user.id
+    tvmaze_id = data.get("tvmaze_id")
     tvmaze_show = data.get("tvmaze_show")
-    episodes_per_season = await get_episodes_per_season(data["tvmaze_id"])
+
+    episodes_per_season = await get_episodes_per_season(tvmaze_id)
     poster_file_id = await download_poster_silently(tvmaze_show, user_id) if tvmaze_show else None
 
     with get_db() as conn:
@@ -294,24 +331,34 @@ async def confirm_add(callback: types.CallbackQuery, state: FSMContext):
         cur.execute('''
             INSERT INTO series (user_id, name, tvmaze_id, poster_file_id, episodes_per_season)
             VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, data["name"], data["tvmaze_id"], poster_file_id, episodes_per_season))
+        ''', (user_id, data["name"], tvmaze_id, poster_file_id, episodes_per_season))
+        conn.commit()
+
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
         conn.commit()
 
     await state.clear()
-    await callback.message.edit_text("✅ Сериал добавлен!")
+    await callback.message.edit_text(f"✅ Сериал «{data['name']}» добавлен!")
     await cmd_my(callback.message)
+
 
 @dp.callback_query(F.data == "cancel_add")
 async def cancel_add(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.message.edit_text("Добавление отменено.")
 
+
 @dp.message(Command("my"))
 async def cmd_my(message: types.Message):
     user_id = message.from_user.id
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT id, name, poster_file_id, airing_days, completed, notifications_enabled FROM series WHERE user_id = ?", (user_id,))
+        cur.execute("""
+            SELECT id, name, poster_file_id, airing_days, completed, notifications_enabled 
+            FROM series WHERE user_id = ?
+        """, (user_id,))
         series_list = cur.fetchall()
 
     if not series_list:
@@ -322,9 +369,13 @@ async def cmd_my(message: types.Message):
     for sid, name, poster, airing_days, completed, notif in series_list:
         airing_str = ', '.join(days_map[int(d)] for d in airing_days.split(',')) if airing_days else "—"
         total_watched = get_watched_count(sid)
-        progress = [f"Сезон {s}: {w}/{t}{st}" for s, w, t, st in get_active_seasons_progress(sid)]
+        progress_lines = [f"Сезон {s}: {w}/{t}{st}" for s, w, t, st in get_active_seasons_progress(sid)]
 
-        caption = f"🎬 <b>{name}</b>\n📅 Выход: {airing_str}\n👁 Просмотрено: {total_watched}\n\n" + "\n".join(progress)
+        caption = (f"🎬 <b>{name}</b>\n"
+                   f"📅 Выход: {airing_str}\n"
+                   f"👁 Просмотрено всего: {total_watched}\n\n"
+                   + "\n".join(progress_lines))
+
         markup = series_keyboard(sid, completed, notif)
 
         if poster:
@@ -336,20 +387,21 @@ async def cmd_my(message: types.Message):
             await message.answer(caption, parse_mode="HTML", reply_markup=markup)
 
 
-# ====================== КНОПКИ ======================
+# ====================== ОБРАБОТЧИКИ КНОПОК ======================
 @dp.callback_query(F.data.startswith("mark_episodes_"))
 async def start_mark_episodes(callback: types.CallbackQuery, state: FSMContext):
     series_id = int(callback.data.split("_")[-1])
     await state.update_data(series_id=series_id)
     await state.set_state(BotStates.select_season_mark)
-    await callback.message.edit_text("Введите номер сезона:")
+    await callback.message.edit_text("Введите номер сезона для отметки эпизодов:")
     await callback.answer()
+
 
 @dp.message(BotStates.select_season_mark)
 async def process_select_season_mark(message: types.Message, state: FSMContext):
     try:
         season = int(message.text.strip())
-    except:
+    except ValueError:
         await message.answer("❌ Введи число!")
         return
     data = await state.get_data()
@@ -360,37 +412,51 @@ async def process_select_season_mark(message: types.Message, state: FSMContext):
         eps = cur.fetchone()[0] or 24
     await state.update_data(current_season=season, total_episodes=eps)
     await state.set_state(BotStates.mark_multiple_episodes)
-    await message.answer(f"Отмечай эпизоды сезона {season}:", reply_markup=episodes_keyboard(series_id, season, eps))
+    await message.answer(f"🎬 Отмечай эпизоды сезона {season}:", reply_markup=episodes_keyboard(series_id, season, eps))
+
 
 @dp.callback_query(F.data.startswith("toggle_ep_"))
 async def toggle_episode(callback: types.CallbackQuery, state: FSMContext):
-    _, sid, season, ep = callback.data.split("_")
-    series_id, season, ep = int(sid), int(season), int(ep)
+    _, series_id_str, season_str, ep_str = callback.data.split("_")
+    series_id = int(series_id_str)
+    season = int(season_str)
+    episode = int(ep_str)
+
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("INSERT OR IGNORE INTO watched_episodes (series_id, season, episode) VALUES (?,?,?)", (series_id, season, ep))
+        cur.execute("INSERT OR IGNORE INTO watched_episodes (series_id, season, episode) VALUES (?, ?, ?)", 
+                    (series_id, season, episode))
         if cur.rowcount == 0:
-            cur.execute("DELETE FROM watched_episodes WHERE series_id=? AND season=? AND episode=?", (series_id, season, ep))
+            cur.execute("DELETE FROM watched_episodes WHERE series_id=? AND season=? AND episode=?", 
+                        (series_id, season, episode))
         conn.commit()
+
     data = await state.get_data()
     total = data.get("total_episodes", 24)
     try:
         await callback.message.edit_reply_markup(reply_markup=episodes_keyboard(series_id, season, total))
     except TelegramBadRequest:
         pass
-    await callback.answer(f"S{season}E{ep}")
+    await callback.answer(f"✅ S{season}E{episode}")
+
 
 @dp.callback_query(F.data.startswith("finish_marking_"))
 async def finish_marking(callback: types.CallbackQuery, state: FSMContext):
     series_id = int(callback.data.split("_")[-1])
-    await callback.answer("✅ Сохранено!", show_alert=True)
+    await callback.answer(f"✅ Сохранено! Просмотрено: {get_watched_count(series_id)}", show_alert=True)
     await state.clear()
     await show_series_menu(callback.message, series_id)
+
 
 @dp.callback_query(F.data == "cancel_marking")
 async def cancel_marking(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.delete()
+    try:
+        await callback.message.delete()
+    except:
+        pass
+    await callback.answer("Отменено")
+
 
 @dp.callback_query(F.data.startswith("calendar_"))
 async def show_calendar(callback: types.CallbackQuery):
@@ -398,31 +464,42 @@ async def show_calendar(callback: types.CallbackQuery):
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT name, tvmaze_id FROM series WHERE id = ?", (series_id,))
-        name, tvmaze_id = cur.fetchone() or (None, None)
+        row = cur.fetchone()
+        if not row:
+            await callback.answer("Сериал не найден", show_alert=True)
+            return
+        name, tvmaze_id = row
+
     if not tvmaze_id:
-        await callback.answer("Календарь недоступен")
+        await callback.answer("Календарь недоступен", show_alert=True)
         return
+
     next_ep = await get_next_episode(tvmaze_id)
     if not next_ep:
-        text = f"🎬 <b>{name}</b>\n\nНет новых серий."
+        text = f"🎬 <b>{name}</b>\n\nСериал завершён или новых серий нет."
     else:
-        text = f"📅 <b>Календарь — {name}</b>\n\nСледующая: S{next_ep.get('season')}E{next_ep.get('number')}\nДата: {next_ep.get('airdate')}"
+        text = (f"📅 <b>Календарь — {name}</b>\n\n"
+                f"Следующая серия: S{next_ep.get('season')}E{next_ep.get('number')}\n"
+                f"Дата: {next_ep.get('airdate')}")
+
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=series_keyboard(series_id))
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("finish_season_"))
 async def start_finish_season(callback: types.CallbackQuery, state: FSMContext):
     series_id = int(callback.data.split("_")[-1])
     await state.update_data(series_id=series_id)
     await state.set_state(BotStates.select_season_finish)
-    await callback.message.edit_text("Введите номер сезона для завершения:")
+    await callback.message.edit_text("Введите номер сезона, который хотите завершить:")
     await callback.answer()
+
 
 @dp.message(BotStates.select_season_finish)
 async def process_finish_season(message: types.Message, state: FSMContext):
     try:
         season = int(message.text.strip())
-    except:
+    except ValueError:
         await message.answer("❌ Введи число!")
         return
     data = await state.get_data()
@@ -435,6 +512,7 @@ async def process_finish_season(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Сезон {season} завершён!")
     await show_series_menu(message, series_id)
 
+
 @dp.callback_query(F.data.startswith("toggle_notif_"))
 async def toggle_notifications(callback: types.CallbackQuery):
     series_id = int(callback.data.split("_")[-1])
@@ -442,11 +520,13 @@ async def toggle_notifications(callback: types.CallbackQuery):
         cur = conn.cursor()
         cur.execute("SELECT notifications_enabled FROM series WHERE id = ?", (series_id,))
         enabled = cur.fetchone()[0] or 1
-        new = 0 if enabled else 1
-        cur.execute("UPDATE series SET notifications_enabled = ? WHERE id = ?", (new, series_id))
+        new_state = 0 if enabled else 1
+        cur.execute("UPDATE series SET notifications_enabled = ? WHERE id = ?", (new_state, series_id))
         conn.commit()
-    await callback.answer("Уведомления обновлены", show_alert=True)
+    status = "включены 🔔" if new_state else "выключены 🔕"
+    await callback.answer(f"Уведомления {status}", show_alert=True)
     await show_series_menu(callback.message, series_id)
+
 
 @dp.callback_query(F.data.startswith("complete_"))
 async def complete_series(callback: types.CallbackQuery):
@@ -455,8 +535,9 @@ async def complete_series(callback: types.CallbackQuery):
         cur = conn.cursor()
         cur.execute("UPDATE series SET completed = 1 WHERE id = ?", (series_id,))
         conn.commit()
-    await callback.answer("✅ Сериал завершён", show_alert=True)
+    await callback.answer("✅ Сериал отмечен как завершённый", show_alert=True)
     await show_series_menu(callback.message, series_id)
+
 
 @dp.callback_query(F.data.startswith("delete_"))
 async def delete_series(callback: types.CallbackQuery):
@@ -468,22 +549,33 @@ async def delete_series(callback: types.CallbackQuery):
         cur.execute("DELETE FROM finished_seasons WHERE series_id = ?", (series_id,))
         conn.commit()
     await callback.answer("🗑 Сериал удалён", show_alert=True)
-    await callback.message.delete()
+    try:
+        await callback.message.delete()
+    except:
+        pass
+
 
 @dp.callback_query(F.data == "change_time")
 async def change_notification_time(callback: types.CallbackQuery):
-    await callback.message.edit_text("Выбери время уведомлений:", reply_markup=notification_time_keyboard())
+    await callback.message.edit_text("Выбери удобное время для уведомлений:", reply_markup=notification_time_keyboard())
     await callback.answer()
+
 
 @dp.callback_query(F.data.startswith("set_time_"))
 async def set_user_time(callback: types.CallbackQuery):
-    _, h, m = callback.data.split("_")
+    _, hour, minute = callback.data.split("_")
     user_id = callback.from_user.id
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("INSERT OR REPLACE INTO users (user_id, notification_hour, notification_minute) VALUES (?,?,?)", (user_id, int(h), int(m)))
+        cur.execute("""
+            INSERT INTO users (user_id, notification_hour, notification_minute)
+            VALUES (?, ?, ?) 
+            ON CONFLICT(user_id) DO UPDATE SET 
+                notification_hour = excluded.notification_hour,
+                notification_minute = excluded.notification_minute
+        """, (user_id, int(hour), int(minute)))
         conn.commit()
-    await callback.answer(f"Время установлено: {h}:{m}", show_alert=True)
+    await callback.answer(f"Время уведомлений: {hour}:{minute}", show_alert=True)
     schedule_notifications()
     await cmd_my(callback.message)
 
@@ -491,7 +583,10 @@ async def set_user_time(callback: types.CallbackQuery):
 async def show_series_menu(message: types.Message, series_id: int):
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT name, poster_file_id, airing_days, completed, notifications_enabled FROM series WHERE id = ?", (series_id,))
+        cur.execute("""
+            SELECT name, poster_file_id, airing_days, completed, notifications_enabled 
+            FROM series WHERE id = ?
+        """, (series_id,))
         row = cur.fetchone()
         if not row: return
         name, poster, airing_days, completed, notif = row
@@ -499,45 +594,49 @@ async def show_series_menu(message: types.Message, series_id: int):
     days_map = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
     airing_str = ', '.join(days_map[int(d)] for d in airing_days.split(',')) if airing_days else "—"
     total_watched = get_watched_count(series_id)
-    progress = [f"Сезон {s}: {w}/{t}{st}" for s, w, t, st in get_active_seasons_progress(series_id)]
+    progress_lines = [f"Сезон {s}: {w}/{t}{st}" for s, w, t, st in get_active_seasons_progress(series_id)]
 
-    caption = f"🎬 <b>{name}</b>\n📅 Выход: {airing_str}\n👁 Просмотрено: {total_watched}\n\n" + "\n".join(progress)
+    caption = (f"🎬 <b>{name}</b>\n"
+               f"📅 Выход: {airing_str}\n"
+               f"👁 Просмотрено всего: {total_watched}\n\n"
+               + "\n".join(progress_lines))
+
     markup = series_keyboard(series_id, completed, notif)
 
     try:
         await message.edit_text(caption, parse_mode="HTML", reply_markup=markup)
     except TelegramBadRequest:
         pass
-    except:
+    except Exception:
         if poster:
-            await message.answer_photo(photo=poster, caption=caption, parse_mode="HTML", reply_markup=markup)
+            try:
+                await message.answer_photo(photo=poster, caption=caption, parse_mode="HTML", reply_markup=markup)
+            except:
+                await message.answer(caption, parse_mode="HTML", reply_markup=markup)
         else:
             await message.answer(caption, parse_mode="HTML", reply_markup=markup)
 
 
 # ====================== ЗАПУСК ======================
-@dp.startup()
-async def on_startup():
+async def main():
     init_db()
+
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT DISTINCT user_id FROM series")
         for (uid,) in cur.fetchall():
             cur.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (uid,))
         conn.commit()
+
     scheduler.start()
     schedule_notifications()
-    print("🤖 Бот запущен — все кнопки должны работать!")
 
+    print("🚀 Запуск бота на Railway...")
 
-@dp.shutdown()
-async def on_shutdown():
-    scheduler.shutdown(wait=False)
-    await bot.session.close()
-
-
-async def main():
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    await asyncio.gather(
+        start_web_server(),
+        dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    )
 
 
 if __name__ == "__main__":
